@@ -1,0 +1,6 @@
+{
+  "name": "Bangladesh Law Hub",
+  "description": "A comprehensive digital portal and interactive companion for major laws of Bangladesh including Penal Code, Criminal Procedure, Evidence Act, Constitution, and special legislations with bi-lingual support.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
