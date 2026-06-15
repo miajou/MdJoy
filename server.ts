@@ -3,6 +3,24 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
+import { requireAuth, AuthRequest } from "./src/middleware/auth.ts";
+import { 
+  getOrCreateUser, 
+  getBookmarks, 
+  addBookmark, 
+  removeBookmark, 
+  getCustomSections, 
+  upsertCustomSection, 
+  deleteCustomSection,
+  getAllUsers,
+  updateUserRole,
+  getDynamicLaws,
+  createOrUpdateDynamicLaw,
+  deleteDynamicLaw,
+  getDynamicSections,
+  createOrUpdateDynamicSection,
+  deleteDynamicSection
+} from "./src/db/queries.ts";
 
 dotenv.config();
 
@@ -80,6 +98,336 @@ async function startServer() {
 
   // Parse JSON payloads
   app.use(express.json());
+
+  // Users Sync
+  app.post("/api/users/sync", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const email = req.user?.email || "";
+      const uid = req.user?.uid || "";
+      if (!uid) {
+        return res.status(400).json({ error: "Invalid Firebase User context" });
+      }
+      const dbUser = await getOrCreateUser(uid, email);
+      res.json(dbUser);
+    } catch (err: any) {
+      console.error("Failed to sync user profile:", err);
+      res.status(500).json({ error: "Failed to synchronize profile with database." });
+    }
+  });
+
+  // GET Bookmarks
+  app.get("/api/bookmarks", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const email = req.user?.email || "";
+      const uid = req.user?.uid || "";
+      const dbUser = await getOrCreateUser(uid, email);
+      const list = await getBookmarks(dbUser.id);
+      res.json(list);
+    } catch (err: any) {
+      console.error("Failed to fetch bookmarks:", err);
+      res.status(500).json({ error: "Failed to fetch bookmarks from database." });
+    }
+  });
+
+  // POST Bookmark
+  app.post("/api/bookmarks", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { sectionId, lawId } = req.body;
+      if (!sectionId || !lawId) {
+        return res.status(400).json({ error: "Missing sectionId or lawId" });
+      }
+      const email = req.user?.email || "";
+      const uid = req.user?.uid || "";
+      const dbUser = await getOrCreateUser(uid, email);
+      const bookmark = await addBookmark(dbUser.id, sectionId, lawId);
+      res.json(bookmark);
+    } catch (err: any) {
+      console.error("Failed to save bookmark:", err);
+      res.status(500).json({ error: "Failed to save bookmark." });
+    }
+  });
+
+  // DELETE Bookmark
+  app.delete("/api/bookmarks/:sectionId", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const sectionId = req.params.sectionId;
+      if (!sectionId) {
+        return res.status(400).json({ error: "Missing sectionId parameter" });
+      }
+      const email = req.user?.email || "";
+      const uid = req.user?.uid || "";
+      const dbUser = await getOrCreateUser(uid, email);
+      const success = await removeBookmark(dbUser.id, sectionId);
+      res.json({ success });
+    } catch (err: any) {
+      console.error("Failed to delete bookmark:", err);
+      res.status(500).json({ error: "Failed to delete bookmark." });
+    }
+  });
+
+  // GET Custom Sections
+  app.get("/api/custom-sections", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const email = req.user?.email || "";
+      const uid = req.user?.uid || "";
+      const dbUser = await getOrCreateUser(uid, email);
+      const list = await getCustomSections(dbUser.id);
+      res.json(list);
+    } catch (err: any) {
+      console.error("Failed to fetch custom sections:", err);
+      res.status(500).json({ error: "Failed to fetch custom sections." });
+    }
+  });
+
+  // POST Custom Section
+  app.post("/api/custom-sections", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const {
+        sectionId,
+        num,
+        lawId,
+        lawCode,
+        title,
+        titleBn,
+        text,
+        textBn,
+        explanation,
+        explanationBn,
+        example,
+        exampleBn,
+      } = req.body;
+
+      if (!sectionId || !num || !lawId || !lawCode) {
+        return res.status(400).json({ error: "Missing required core parameters for section edit." });
+      }
+
+      const email = req.user?.email || "";
+      const uid = req.user?.uid || "";
+      const dbUser = await getOrCreateUser(uid, email);
+      
+      const customSection = await upsertCustomSection(
+        dbUser.id,
+        sectionId,
+        parseInt(num) || 0,
+        lawId,
+        lawCode,
+        title || "",
+        titleBn || "",
+        text || "",
+        textBn || "",
+        explanation || "",
+        explanationBn || "",
+        example || "",
+        exampleBn || ""
+      );
+
+      res.json(customSection);
+    } catch (err: any) {
+      console.error("Failed to save custom section:", err);
+      res.status(500).json({ error: "Failed to save section customization." });
+    }
+  });
+
+  // DELETE Custom Section
+  app.delete("/api/custom-sections/:sectionId", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const sectionId = req.params.sectionId;
+      if (!sectionId) {
+        return res.status(400).json({ error: "Missing sectionId parameter" });
+      }
+      const email = req.user?.email || "";
+      const uid = req.user?.uid || "";
+      const dbUser = await getOrCreateUser(uid, email);
+      const success = await deleteCustomSection(dbUser.id, sectionId);
+      res.json({ success });
+    } catch (err: any) {
+      console.error("Failed to reset section customization:", err);
+      res.status(500).json({ error: "Failed to delete section customization." });
+    }
+  });
+
+  // --- Dynamic Laws Endpoints (Public GET, Authorized modifications) ---
+  app.get("/api/dynamic-laws", async (req, res) => {
+    try {
+      const laws = await getDynamicLaws();
+      res.json(laws);
+    } catch (err: any) {
+      console.error("Failed to fetch dynamic laws:", err);
+      res.status(500).json({ error: "Failed to fetch custom laws from database." });
+    }
+  });
+
+  app.post("/api/dynamic-laws", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const email = req.user?.email || "";
+      const uid = req.user?.uid || "";
+      const dbUser = await getOrCreateUser(uid, email);
+      
+      if (dbUser.role !== "admin" && dbUser.role !== "moderator") {
+        return res.status(403).json({ error: "Forbidden: Admins and moderators only." });
+      }
+
+      const { lawId, title, titleBn, code, icon, category, description, descriptionBn } = req.body;
+      if (!lawId || !title || !titleBn || !code) {
+        return res.status(400).json({ error: "Missing required law keys (lawId, title, titleBn, code)" });
+      }
+
+      const law = await createOrUpdateDynamicLaw(
+        lawId.trim(),
+        title.trim(),
+        titleBn.trim(),
+        code.trim(),
+        icon ? icon.trim() : "Scale",
+        category ? category.trim() : "Criminal",
+        description ? description.trim() : "",
+        descriptionBn ? descriptionBn.trim() : ""
+      );
+      res.json(law);
+    } catch (err: any) {
+      console.error("Failed to insert/update dynamic law:", err);
+      res.status(500).json({ error: "Failed to save dynamic law." });
+    }
+  });
+
+  app.delete("/api/dynamic-laws/:lawId", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const email = req.user?.email || "";
+      const uid = req.user?.uid || "";
+      const dbUser = await getOrCreateUser(uid, email);
+      
+      if (dbUser.role !== "admin" && dbUser.role !== "moderator") {
+        return res.status(403).json({ error: "Forbidden: Admins and moderators only." });
+      }
+
+      const lawId = req.params.lawId;
+      const success = await deleteDynamicLaw(lawId);
+      res.json({ success });
+    } catch (err: any) {
+      console.error("Failed to delete dynamic law:", err);
+      res.status(500).json({ error: "Failed to delete dynamic law." });
+    }
+  });
+
+  // --- Dynamic Sections Endpoints (Public GET, Authorized modifications) ---
+  app.get("/api/dynamic-sections", async (req, res) => {
+    try {
+      const sections = await getDynamicSections();
+      res.json(sections);
+    } catch (err: any) {
+      console.error("Failed to fetch dynamic sections:", err);
+      res.status(500).json({ error: "Failed to fetch custom law clauses." });
+    }
+  });
+
+  app.post("/api/dynamic-sections", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const email = req.user?.email || "";
+      const uid = req.user?.uid || "";
+      const dbUser = await getOrCreateUser(uid, email);
+      
+      if (dbUser.role !== "admin" && dbUser.role !== "moderator") {
+        return res.status(403).json({ error: "Forbidden: Admins and moderators only." });
+      }
+
+      const {
+        sectionId,
+        lawId,
+        num,
+        title,
+        titleBn,
+        text,
+        textBn,
+        explanation,
+        explanationBn,
+        example,
+        exampleBn
+      } = req.body;
+
+      if (!sectionId || !lawId || num === undefined || !title || !titleBn) {
+        return res.status(400).json({ error: "Missing required section fields (sectionId, lawId, num, title, titleBn)" });
+      }
+
+      const section = await createOrUpdateDynamicSection(
+        sectionId.trim(),
+        lawId.trim(),
+        parseInt(num) || 0,
+        title.trim(),
+        titleBn.trim(),
+        text ? text.trim() : "",
+        textBn ? textBn.trim() : "",
+        explanation ? explanation.trim() : "",
+        explanationBn ? explanationBn.trim() : "",
+        example ? example.trim() : "",
+        exampleBn ? exampleBn.trim() : ""
+      );
+      res.json(section);
+    } catch (err: any) {
+      console.error("Failed to insert/update dynamic section:", err);
+      res.status(500).json({ error: "Failed to save dynamic section." });
+    }
+  });
+
+  app.delete("/api/dynamic-sections/:sectionId", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const email = req.user?.email || "";
+      const uid = req.user?.uid || "";
+      const dbUser = await getOrCreateUser(uid, email);
+      
+      if (dbUser.role !== "admin" && dbUser.role !== "moderator") {
+        return res.status(403).json({ error: "Forbidden: Admins and moderators only." });
+      }
+
+      const sectionId = req.params.sectionId;
+      const success = await deleteDynamicSection(sectionId);
+      res.json({ success });
+    } catch (err: any) {
+      console.error("Failed to delete dynamic section:", err);
+      res.status(500).json({ error: "Failed to delete dynamic section." });
+    }
+  });
+
+  // --- Admin RBAC - Manage Users ---
+  app.get("/api/admin/users", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const email = req.user?.email || "";
+      const uid = req.user?.uid || "";
+      const dbUser = await getOrCreateUser(uid, email);
+      
+      if (dbUser.role !== "admin") {
+        return res.status(403).json({ error: "Access Denied: Admins only." });
+      }
+
+      const usersList = await getAllUsers();
+      res.json(usersList);
+    } catch (err: any) {
+      console.error("Failed to list users:", err);
+      res.status(500).json({ error: "Failed to retrieve user directory." });
+    }
+  });
+
+  app.post("/api/admin/users/:userId/role", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const email = req.user?.email || "";
+      const uid = req.user?.uid || "";
+      const dbUser = await getOrCreateUser(uid, email);
+      
+      if (dbUser.role !== "admin") {
+        return res.status(403).json({ error: "Access Denied: Admins only." });
+      }
+
+      const userId = parseInt(req.params.userId);
+      const { role } = req.body;
+      if (!role || !["admin", "moderator", "user"].includes(role)) {
+        return res.status(400).json({ error: "Invalid role value." });
+      }
+
+      const updatedUser = await updateUserRole(userId, role);
+      res.json(updatedUser);
+    } catch (err: any) {
+      console.error("Failed to update user role:", err);
+      res.status(500).json({ error: "Failed to alter user role." });
+    }
+  });
 
   // API Route for legal sections generation
   app.post("/api/section-explanation", async (req, res) => {

@@ -1,4 +1,15 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
+import { 
+  signInWithPopup, 
+  signOut, 
+  onAuthStateChanged, 
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  updateProfile,
+  sendPasswordResetEmail,
+  User as FirebaseUser 
+} from "firebase/auth";
+import { auth, googleAuthProvider } from "./lib/firebase";
 import { LAWS, UPDATES, CATEGORIES } from "./data";
 import { Law, Section, Chapter, Update } from "./types";
 import {
@@ -24,7 +35,13 @@ import {
   HelpCircle,
   BookOpen,
   Eye,
-  Trash2
+  Trash2,
+  Shield,
+  Settings,
+  Plus,
+  Edit2,
+  Lock,
+  UserCheck
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -34,6 +51,53 @@ const toBengaliNumber = (num: number | string): string => {
 };
 
 export default function App() {
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [authChecked, setAuthChecked] = useState<boolean>(false);
+  const [syncing, setSyncing] = useState<boolean>(false);
+  const [userRole, setUserRole] = useState<string>("user"); // 'admin' | 'moderator' | 'user'
+  
+  // Custom auth portal modal
+  const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
+  const [authTab, setAuthTab] = useState<"login" | "register">("login");
+  const [authEmail, setAuthEmail] = useState<string>("");
+  const [authPassword, setAuthPassword] = useState<string>("");
+  const [authName, setAuthName] = useState<string>("");
+  const [authError, setAuthError] = useState<string>("");
+  const [authLoading, setAuthLoading] = useState<boolean>(false);
+
+  // Dynamic law database state loaded from PostgreSQL via Express APIs
+  const [dynamicLawsList, setDynamicLawsList] = useState<any[]>([]);
+  const [dynamicSectionsList, setDynamicSectionsList] = useState<any[]>([]);
+  
+  // User management lists for Admins
+  const [adminUsersList, setAdminUsersList] = useState<any[]>([]);
+  const [loadingAdminUsers, setLoadingAdminUsers] = useState<boolean>(false);
+
+  // Form states for Admin Creating dynamic laws
+  const [lawFormId, setLawFormId] = useState("");
+  const [lawFormTitle, setLawFormTitle] = useState("");
+  const [lawFormTitleBn, setLawFormTitleBn] = useState("");
+  const [lawFormCode, setLawFormCode] = useState("");
+  const [lawFormCategory, setLawFormCategory] = useState("Criminal");
+  const [lawFormIcon, setLawFormIcon] = useState("Scale");
+  const [lawFormDesc, setLawFormDesc] = useState("");
+  const [lawFormDescBn, setLawFormDescBn] = useState("");
+
+  // Form states for Admin Creating dynamic sections
+  const [secFormLawId, setSecFormLawId] = useState("");
+  const [secFormId, setSecFormId] = useState("");
+  const [secFormNum, setSecFormNum] = useState("");
+  const [secFormTitle, setSecFormTitle] = useState("");
+  const [secFormTitleBn, setSecFormTitleBn] = useState("");
+  const [secFormText, setSecFormText] = useState("");
+  const [secFormTextBn, setSecFormTextBn] = useState("");
+  const [secFormExplanation, setSecFormExplanation] = useState("");
+  const [secFormExplanationBn, setSecFormExplanationBn] = useState("");
+  const [secFormExample, setSecFormExample] = useState("");
+  const [secFormExampleBn, setSecFormExampleBn] = useState("");
+
+  const [adminTab, setAdminTab] = useState<"users" | "laws" | "sections">("users");
+
   // ── CORE STATES (With LocalStorage Hydration) ──────────────────────────────
   const [dark, setDark] = useState<boolean>(() => {
     try {
@@ -77,6 +141,86 @@ export default function App() {
     }
   });
 
+  // Stateful law database with custom overrides mapped inline
+  const allLaws = useMemo(() => {
+    // 1. Process static laws with any updates
+    const base = LAWS.map((law) => {
+      // Find dynamic sections added to this static law
+      const extraSectionsForThisLaw = dynamicSectionsList
+        .filter(ds => ds.lawId === law.id)
+        .map(ds => ({
+          id: ds.sectionId,
+          num: ds.num,
+          title: ds.title,
+          titleBn: ds.titleBn,
+          text: ds.text,
+          textBn: ds.textBn,
+          explanation: ds.explanation,
+          explanationBn: ds.explanationBn,
+          example: ds.example,
+          exampleBn: ds.exampleBn,
+          tag: ["Custom", "Dynamic"],
+          isDynamic: true
+        }));
+
+      const allSecs = [...law.sections, ...extraSectionsForThisLaw];
+      // De-duplicate if somehow there is a clash (using sectionId/id mapping)
+      const seenIds = new Set<string>();
+      const uniqueSecs = [];
+      for (const s of allSecs) {
+        if (!seenIds.has(s.id)) {
+          seenIds.add(s.id);
+          uniqueSecs.push(s);
+        }
+      }
+
+      return {
+        ...law,
+        sections: uniqueSecs.map((sec) => {
+          const customized = customGeneratedSections[sec.id];
+          return customized ? { ...sec, ...customized } : sec;
+        })
+      };
+    });
+
+    // 2. Process dynamic laws added by admin
+    const dynMapped = dynamicLawsList.map((dl) => {
+      // Find sections for this dynamic law
+      const secs = dynamicSectionsList
+        .filter(ds => ds.lawId === dl.lawId)
+        .map(ds => ({
+          id: ds.sectionId,
+          num: ds.num,
+          title: ds.title,
+          titleBn: ds.titleBn,
+          text: ds.text,
+          textBn: ds.textBn,
+          explanation: ds.explanation,
+          explanationBn: ds.explanationBn,
+          example: ds.example,
+          exampleBn: ds.exampleBn,
+          tag: [dl.category, "Admin"],
+          isDynamic: true
+        }));
+
+      return {
+        id: dl.lawId,
+        title: dl.title,
+        titleBn: dl.titleBn,
+        code: dl.code,
+        icon: dl.icon || "Scale",
+        category: dl.category || "Criminal",
+        color: "from-amber-600 to-amber-800", // beautiful amber theme for dynamic custom laws
+        description: dl.description,
+        descriptionBn: dl.descriptionBn,
+        isDynamic: true,
+        sections: secs
+      };
+    });
+
+    return [...base, ...dynMapped];
+  }, [customGeneratedSections, dynamicLawsList, dynamicSectionsList]);
+
   const [bookmarks, setBookmarks] = useState<string[]>(() => {
     try {
       const saved = localStorage.getItem("blh_bookmarks");
@@ -119,6 +263,116 @@ export default function App() {
   const [showNotifications, setShowNotifications] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
+  // Custom Clause editor states & handlers
+  const [isEditingSection, setIsEditingSection] = useState<boolean>(false);
+  const [editForm, setEditForm] = useState({
+    title: "",
+    titleBn: "",
+    text: "",
+    textBn: "",
+    explanation: "",
+    explanationBn: "",
+    example: "",
+    exampleBn: ""
+  });
+
+  const handleSaveCustomSection = async () => {
+    if (!selectedSection) return;
+    const updated = {
+      ...selectedSection,
+      title: editForm.title,
+      titleBn: editForm.titleBn,
+      text: editForm.text,
+      textBn: editForm.textBn,
+      explanation: editForm.explanation,
+      explanationBn: editForm.explanationBn,
+      example: editForm.example,
+      exampleBn: editForm.exampleBn,
+    };
+    setCustomGeneratedSections((prev) => ({
+      ...prev,
+      [selectedSection.id]: updated
+    }));
+    setSelectedSection(updated);
+    setIsEditingSection(false);
+    triggerToast(isBn ? "ধারা এবং বিবরণী সংরক্ষণ করা হয়েছে!" : "Successfully updated clause details!");
+
+    if (user) {
+      try {
+        const token = await user.getIdToken();
+        await fetch("/api/custom-sections", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            sectionId: selectedSection.id,
+            num: selectedSection.num,
+            lawId: selectedSection.lawId,
+            lawCode: selectedSection.lawCode,
+            title: editForm.title,
+            titleBn: editForm.titleBn,
+            text: editForm.text,
+            textBn: editForm.textBn,
+            explanation: editForm.explanation,
+            explanationBn: editForm.explanationBn,
+            example: editForm.example,
+            exampleBn: editForm.exampleBn,
+          })
+        });
+      } catch (err) {
+        console.error("Failed synchronizing custom section to database:", err);
+      }
+    }
+  };
+
+  const handleRevertSection = async () => {
+    if (!selectedSection) return;
+    const rawId = selectedSection.lawId;
+    const originalLaw = LAWS.find(l => l.id === rawId);
+    const originalSec = originalLaw?.sections.find(s => s.id === selectedSection.id);
+    if (originalSec) {
+      setCustomGeneratedSections((prev) => {
+        const copy = { ...prev };
+        delete copy[selectedSection.id];
+        return copy;
+      });
+      const restored = {
+        ...originalSec,
+        lawColor: originalLaw.color,
+        lawTitle: isBn ? originalLaw.titleBn : originalLaw.title,
+        lawCode: originalLaw.code,
+        lawId: originalLaw.id,
+        lawIcon: originalLaw.icon,
+        category: originalLaw.category
+      };
+      setSelectedSection(restored);
+      triggerToast(isBn ? "প্রাক-নির্ধারিত মূল ধারায় সফলভাবে ফিরিয়ে নেওয়া হয়েছে!" : "Successfully restored standard statutory text!");
+    } else {
+      setCustomGeneratedSections((prev) => {
+        const copy = { ...prev };
+        delete copy[selectedSection.id];
+        return copy;
+      });
+      setSelectedSection(null);
+      triggerToast(isBn ? "কাস্টম ধারাটি মুছে ফেলা হয়েছে!" : "Custom section deleted.");
+    }
+    setIsEditingSection(false);
+
+    if (user) {
+      try {
+        const token = await user.getIdToken();
+        await fetch(`/api/custom-sections/${selectedSection.id}`, {
+          method: "DELETE",
+          headers: { "Authorization": `Bearer ${token}` }
+        });
+      } catch (err) {
+        console.error("Failed deleting custom section customization:", err);
+      }
+    }
+  };
+
   // ── EFFECT PERSISTENCE ──────────────────────────────────────────────────────
   useEffect(() => {
     localStorage.setItem("blh_dark", JSON.stringify(dark));
@@ -148,11 +402,262 @@ export default function App() {
     localStorage.setItem("blh_custom_sections", JSON.stringify(customGeneratedSections));
   }, [customGeneratedSections]);
 
+  // ── FIREBASE AUTH & DATABASE CLOUD SYNC EFFECT ─────────────────────────────
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      setUser(currentUser);
+      if (currentUser) {
+        try {
+          setSyncing(true);
+          const token = await currentUser.getIdToken();
+          
+          // 1. Sync User Profile with PostgreSQL via Cloud SQL
+          const syncRes = await fetch("/api/users/sync", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${token}`
+            }
+          });
+          if (!syncRes.ok) throw new Error("Could not sync user profile.");
+          const dbProfile = await syncRes.json();
+          setUserRole(dbProfile.role || "user");
+
+          // 2. Load Bookmarks from Cloud SQL
+          const bookmarksRes = await fetch("/api/bookmarks", {
+            headers: { "Authorization": `Bearer ${token}` }
+          });
+          if (bookmarksRes.ok) {
+            const dbBookmarks: any[] = await bookmarksRes.json();
+            const dbIds = dbBookmarks.map(b => b.sectionId);
+            setBookmarks((prev) => {
+              const union = Array.from(new Set([...prev, ...dbIds]));
+              const offlineOnly = prev.filter(id => !dbIds.includes(id));
+              offlineOnly.forEach((bid) => {
+                fetch("/api/bookmarks", {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${token}`
+                  },
+                  body: JSON.stringify({ sectionId: bid, lawId: "bpc1860" })
+                }).catch(console.error);
+              });
+              return union;
+            });
+          }
+
+          // 3. Load custom clause edit definitions from Cloud SQL
+          const customRes = await fetch("/api/custom-sections", {
+            headers: { "Authorization": `Bearer ${token}` }
+          });
+          if (customRes.ok) {
+            const dbCustoms: any[] = await customRes.json();
+            const dbMap: Record<string, any> = {};
+            dbCustoms.forEach((row) => {
+              dbMap[row.sectionId] = {
+                id: row.sectionId,
+                num: row.num,
+                lawId: row.lawId,
+                lawCode: row.lawCode,
+                title: row.title,
+                titleBn: row.titleBn,
+                text: row.text,
+                textBn: row.textBn,
+                explanation: row.explanation,
+                explanationBn: row.explanationBn,
+                example: row.example,
+                exampleBn: row.exampleBn
+              };
+            });
+
+            setCustomGeneratedSections((prev) => {
+              const combined = { ...prev, ...dbMap };
+              const localOnlyIds = Object.keys(prev).filter(id => !dbMap[id]);
+              localOnlyIds.forEach((id) => {
+                const sec = prev[id];
+                fetch("/api/custom-sections", {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${token}`
+                  },
+                  body: JSON.stringify({
+                    sectionId: sec.id,
+                    num: sec.num,
+                    lawId: sec.lawId,
+                    lawCode: sec.lawCode,
+                    title: sec.title,
+                    titleBn: sec.titleBn,
+                    text: sec.text,
+                    textBn: sec.textBn,
+                    explanation: sec.explanation,
+                    explanationBn: sec.explanationBn,
+                    example: sec.example,
+                    exampleBn: sec.exampleBn
+                  })
+                }).catch(console.error);
+              });
+              return combined;
+            });
+          }
+        } catch (err) {
+          console.error("Failed synchronizing local storage state to cloud:", err);
+        } finally {
+          setSyncing(false);
+          setAuthChecked(true);
+        }
+      } else {
+        setUserRole("user");
+        setAuthChecked(true);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Fetch dynamic laws and sections from PostgreSQL via Express APIs
+  const loadDynamicDatabase = async () => {
+    try {
+      const resLaws = await fetch("/api/dynamic-laws");
+      if (resLaws.ok) {
+        const laws = await resLaws.json();
+        setDynamicLawsList(laws);
+      }
+      const resSecs = await fetch("/api/dynamic-sections");
+      if (resSecs.ok) {
+        const secs = await resSecs.json();
+        setDynamicSectionsList(secs);
+      }
+    } catch (err) {
+      console.error("Failed to load dynamic databases:", err);
+    }
+  };
+
+  useEffect(() => {
+    loadDynamicDatabase();
+  }, [user]);
+
   // Toast feedback helper
   const triggerToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 2500);
   };
+
+  // Handle standard custom email/password authentication (registration/login)
+  const handleEmailAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError("");
+    setAuthLoading(true);
+
+    try {
+      if (!authEmail || !authPassword) {
+        throw new Error(isBn ? "ইমেইল এবং পাসওয়ার্ড প্রদান করুন।" : "Please enter email and password.");
+      }
+
+      const emailTrimmed = authEmail.trim();
+
+      if (authTab === "register") {
+        if (!authName) {
+          throw new Error(isBn ? "অনুগ্রহ করে আপনার নাম প্রদান করুন।" : "Please enter your name.");
+        }
+        if (authPassword.length < 6) {
+          throw new Error(isBn ? "পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের হতে হবে।" : "Password must be at least 6 characters.");
+        }
+
+        // 1. Create User
+        const credential = await createUserWithEmailAndPassword(auth, emailTrimmed, authPassword);
+        
+        // 2. Set display name
+        await updateProfile(credential.user, {
+          displayName: authName.trim()
+        });
+
+        triggerToast(isBn ? "নিবন্ধন সফল হয়েছে!" : "Registration successful!");
+      } else {
+        // Log In
+        await signInWithEmailAndPassword(auth, emailTrimmed, authPassword);
+        triggerToast(isBn ? "লগইন সফল হয়েছে!" : "Logged in successfully!");
+      }
+
+      // Close modal
+      setShowAuthModal(false);
+      setAuthEmail("");
+      setAuthPassword("");
+      setAuthName("");
+    } catch (err: any) {
+      console.error("Auth error:", err);
+      let errMsg = err.message || "Authentication failed.";
+      if (err.code === "auth/invalid-credential" || err.code === "auth/wrong-password" || err.code === "auth/user-not-found") {
+        errMsg = isBn ? "ভুল ইমেইল অথবা পাসওয়ার্ড।" : "Invalid email or password.";
+      } else if (err.code === "auth/email-already-in-use") {
+        errMsg = isBn ? "এই ইমেইলটি ইতিমধ্যে ব্যবহৃত হচ্ছে।" : "This email address is already in use.";
+      } else if (err.code === "auth/weak-password") {
+        errMsg = isBn ? "পাসওয়ার্ড খুবই দুর্বল।" : "Password is too weak.";
+      } else if (err.code === "auth/invalid-email") {
+        errMsg = isBn ? "সরল ইমেইল ঠিকানা প্রদান করুন।" : "Invalid email format.";
+      } else if (err.code === "auth/operation-not-allowed") {
+        errMsg = isBn 
+          ? "ফায়ারবেস ব্যাকএন্ডে ইমেইল/পাসওয়ার্ড সাইন-ইন সক্রিয় (Enable) করা নেই। অনুগ্রহ করে ফায়ারবেস কনসোলের 'Authentication > Sign-in method'-এ এটি সচল করুন।"
+          : "Email/Password sign-in is not enabled in your Firebase project yet. Please enable it in the Firebase Console under 'Authentication > Sign-in method'.";
+      }
+      setAuthError(errMsg);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  // Load all registered users for administrators
+  const loadAdminUsers = async () => {
+    try {
+      setLoadingAdminUsers(true);
+      if (!user) return;
+      const token = await user.getIdToken();
+      const res = await fetch("/api/admin/users", {
+        headers: { "Authorization": `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAdminUsersList(data);
+      }
+    } catch (err) {
+      console.error("Failed to load admin users directory:", err);
+    } finally {
+      setLoadingAdminUsers(false);
+    }
+  };
+
+  // Admin promotions controller
+  const updateUserRoleInDb = async (userId: number, role: string) => {
+    try {
+      if (!user) return;
+      const token = await user.getIdToken();
+      const res = await fetch(`/api/admin/users/${userId}/role`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({ role })
+      });
+      if (res.ok) {
+        triggerToast(isBn ? "ব্যবহারকারী রোল সফলভাবে পরিবর্তন করা হয়েছে!" : "User role modified successfully!");
+        loadAdminUsers();
+      } else {
+        const err = await res.json();
+        triggerToast(err.error || "Failed to update role.");
+      }
+    } catch (err) {
+      console.error("Failed updating role in DB:", err);
+    }
+  };
+
+  // Trigger admin list load when Admin center is focused
+  useEffect(() => {
+    if (tab === "admin" && userRole === "admin") {
+      loadAdminUsers();
+    }
+  }, [tab, userRole, user]);
 
   // ── COMPUTED LEGAL DIRECTORIES ──────────────────────────────────────────────
   const isBn = lang === "bn";
@@ -169,7 +674,7 @@ export default function App() {
 
   // Aggregate all sections with parent metadata for simple search/bookmark listing
   const allSectionsWeighted = useMemo(() => {
-    const base = LAWS.flatMap((law) => {
+    const base = allLaws.flatMap((law) => {
       return law.sections.map((sec) => ({
         ...sec,
         lawCode: law.code,
@@ -180,9 +685,10 @@ export default function App() {
         category: law.category
       }));
     });
-    const custom = Object.values(customGeneratedSections);
-    return [...base, ...custom];
-  }, [isBn, customGeneratedSections]);
+    const predefinedIds = new Set(LAWS.flatMap(law => law.sections.map(s => s.id)));
+    const onlyTrulyCustom = Object.values(customGeneratedSections).filter((sec: any) => !predefinedIds.has(sec.id));
+    return [...base, ...onlyTrulyCustom];
+  }, [allLaws, isBn, customGeneratedSections]);
 
   // Full-text search and catalog filter
   const searchResults = useMemo(() => {
@@ -259,7 +765,7 @@ export default function App() {
 
   const handleOpenSection = (section: Section & { lawColor?: string; lawTitle?: string; lawCode?: string; lawId?: string; lawIcon?: string; category?: string }) => {
     // Save dynamic sections into customGeneratedSections so standard bookmarks/favorites filter works isomorphic
-    const holdsPredefined = LAWS.find((l) => l.id === section.lawId)?.sections.some((s) => s.id === section.id);
+    const holdsPredefined = allLaws.find((l) => l.id === section.lawId)?.sections.some((s) => s.id === section.id);
     if (!holdsPredefined) {
       setCustomGeneratedSections((prev) => ({
         ...prev,
@@ -340,9 +846,9 @@ export default function App() {
     }
   };
 
-  const handleToggleBookmark = (id: string) => {
+  const handleToggleBookmark = async (id: string) => {
+    const exists = bookmarks.includes(id);
     setBookmarks((prev) => {
-      const exists = prev.includes(id);
       if (exists) {
         triggerToast(isBn ? "বুকমার্ক সরানো হয়েছে" : "Removed bookmark");
         return prev.filter((item) => item !== id);
@@ -351,6 +857,31 @@ export default function App() {
         return [...prev, id];
       }
     });
+
+    if (user) {
+      try {
+        const token = await user.getIdToken();
+        if (exists) {
+          await fetch(`/api/bookmarks/${id}`, {
+            method: "DELETE",
+            headers: { "Authorization": `Bearer ${token}` }
+          });
+        } else {
+          const sectionObj = allSectionsWeighted.find(s => s.id === id);
+          const lawId = sectionObj?.lawId || "bpc1860";
+          await fetch("/api/bookmarks", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${token}`
+            },
+            body: JSON.stringify({ sectionId: id, lawId })
+          });
+        }
+      } catch (err) {
+        console.error("Failed synchronizing bookmark to database:", err);
+      }
+    }
   };
 
   const handleToggleFavorite = (id: string) => {
@@ -387,6 +918,254 @@ export default function App() {
     setRecentlyViewed([]);
     triggerToast(isBn ? "ইতিহাস মুছে ফেলা হয়েছে" : "Cleared search history");
   };
+
+  if (!authChecked) {
+    return (
+      <div className={`min-h-screen ${bg} transition-colors duration-300 font-sans flex flex-col items-center justify-center gap-4`}>
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-12 h-12 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded-full flex items-center justify-center animate-pulse border border-emerald-500/20 shadow-md">
+            <Scale className="w-6 h-6 animate-spin" style={{ animationDuration: "3s" }} />
+          </div>
+          <span className="text-xs font-bold tracking-wider text-slate-500 dark:text-slate-400 uppercase animate-pulse">
+            {isBn ? "নিরাপদ সংযোগ যাচাই করা হচ্ছে..." : "Verifying Secure Connection..."}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  if (authChecked && !user) {
+    return (
+      <div className={`min-h-screen ${bg} transition-colors duration-300 font-sans flex items-center justify-center py-6 px-4`}>
+        <div className={`w-full max-w-md ${surface} rounded-3xl shadow-2xl p-6 border ${borderCol} flex flex-col gap-4 relative overflow-hidden`}>
+          {/* Background glowing ornaments */}
+          <div className="absolute -top-12 -left-12 w-32 h-32 bg-emerald-500/10 rounded-full blur-2xl" />
+          <div className="absolute -bottom-12 -right-12 w-32 h-32 bg-amber-500/10 rounded-full blur-2xl" />
+
+          {/* Upper control cluster (Language / Theme) */}
+          <div className="absolute top-4 right-4 flex items-center gap-2 z-10">
+            <button
+              onClick={() => setLang(lang === "en" ? "bn" : "en")}
+              className={`p-1 px-2.5 text-xs font-bold rounded-lg flex items-center gap-1 transition ${surfaceAlt} ${textPrimary} hover:opacity-80 cursor-pointer`}
+            >
+              <Globe className="w-3.5 h-3.5" />
+              {lang === "en" ? "বাং" : "EN"}
+            </button>
+            <button
+              onClick={() => setDark(!dark)}
+              className={`p-1.5 rounded-lg transition ${surfaceAlt} ${textPrimary} hover:opacity-80 cursor-pointer`}
+            >
+              {dark ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+            </button>
+          </div>
+
+          {/* Branding Header */}
+          <div className="text-center pt-8">
+            <div className="mx-auto w-12 h-12 bg-emerald-150/15 text-emerald-600 dark:text-emerald-400 rounded-full flex items-center justify-center mb-2 shadow-sm border border-emerald-500/20">
+              <Shield className="w-5 h-5" />
+            </div>
+            <h3 className={`font-bold text-lg leading-tight ${textPrimary}`}>
+              {isBn ? "বাংলাদেশ আইন সহায়িকা পোর্টাল" : "Bangladesh Law Guide Portal"}
+            </h3>
+            <p className={`text-xs ${textMuted} mt-1`}>
+              {isBn ? "ডিজিটাল ও নিরাপদ নাগরিক আইনি হাব" : "Secure Digital Citizen Law Portal"}
+            </p>
+          </div>
+
+          {/* Tab buttons for switching between Login and Registration */}
+          <div className="grid grid-cols-2 p-1 bg-slate-100 dark:bg-slate-900 rounded-xl gap-1">
+            <button
+              type="button"
+              onClick={() => {
+                setAuthTab("login");
+                setAuthError("");
+              }}
+              className={`py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                authTab === "login" 
+                  ? "bg-white dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 shadow-sm"
+                  : `${textMuted} hover:text-slate-800 dark:hover:text-slate-200`
+              }`}
+            >
+              {isBn ? "লগইন" : "Log In"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAuthTab("register");
+                setAuthError("");
+              }}
+              className={`py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                authTab === "register" 
+                  ? "bg-white dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 shadow-sm"
+                  : `${textMuted} hover:text-slate-800 dark:hover:text-slate-200`
+              }`}
+            >
+              {isBn ? "নতুন আইডি খুলুন" : "Create Account"}
+            </button>
+          </div>
+
+          {/* Error display and quick links inside card */}
+          {authError && (
+            <div className="bg-rose-500/10 border border-rose-500/20 text-rose-600 dark:text-rose-400 p-3 rounded-xl text-xs font-bold flex flex-col items-start gap-2.5">
+              <div className="flex items-start gap-1.5 w-full">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-500 mt-0.5" />
+                <span className="leading-normal">{authError}</span>
+              </div>
+              {(authError.includes("sign-in") || authError.includes("সক্রিয়")) && (
+                <div className="mt-1 pt-2 border-t border-rose-500/20 w-full text-[10px] text-slate-700 dark:text-slate-350 flex flex-col gap-1.5 font-normal">
+                  <span className="font-bold text-slate-900 dark:text-slate-250">
+                    {isBn ? "সক্রিয় করার সহজ ধাপসমূহ:" : "How to enable this in 3 easy steps:"}
+                  </span>
+                  <ol className="list-decimal pl-4 space-y-1">
+                    <li>
+                      {isBn ? "নিচের বোতামটি দিয়ে ফায়ারবেস অথেন্টিকেশন কনসোলে যান।" : "Click the button below to open Firebase Auth console."}
+                    </li>
+                    <li>
+                      {isBn ? "'Email/Password' প্রোভাইডার নির্বাচন করুন।" : "Under 'Sign-in method', select the 'Email/Password' provider."}
+                    </li>
+                    <li>
+                      {isBn ? "প্রোভাইডারটি Enable করে সেভ (Save) করুন!" : "Enable the 'Email/Password' toggles and click 'Save'."}
+                    </li>
+                  </ol>
+                  <a 
+                    href="https://console.firebase.google.com/project/festive-strata-5jhcx/authentication/providers" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="mt-1.5 w-full py-2 bg-rose-600 hover:bg-rose-700 dark:bg-rose-500 dark:hover:bg-rose-600 text-white font-bold rounded-lg text-center transition shadow-sm cursor-pointer"
+                  >
+                    {isBn ? "ফায়ারবেস কনসোল খুলুন ↗" : "Open Firebase Console ↗"}
+                  </a>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Authentication Credentials Form */}
+          <form onSubmit={handleEmailAuthSubmit} className="space-y-3.5 text-xs">
+            {authTab === "register" && (
+              <div className="space-y-1">
+                <label className={`font-semibold text-[11px] uppercase tracking-wider block ${textMuted}`}>{isBn ? "আপনার নাম" : "Your Name"}</label>
+                <input 
+                  type="text"
+                  required
+                  placeholder={isBn ? "যেমন: আব্দুর রহমান" : "e.g. Abdur Rahman"}
+                  className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none focus:ring-1 focus:ring-emerald-500`}
+                  value={authName}
+                  onChange={(e) => setAuthName(e.target.value)}
+                />
+              </div>
+            )}
+
+            <div className="space-y-1">
+              <label className={`font-semibold text-[11px] uppercase tracking-wider block ${textMuted}`}>{isBn ? "ইমেইল অ্যাড্রেস" : "Email Address"}</label>
+              <input 
+                type="email"
+                required
+                placeholder={isBn ? "যেমন: address@email.com" : "e.g. address@email.com"}
+                className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none focus:ring-1 focus:ring-emerald-500`}
+                value={authEmail}
+                onChange={(e) => setAuthEmail(e.target.value)}
+              />
+            </div>
+
+            <div className="space-y-1">
+              <label className={`font-semibold text-[11px] uppercase tracking-wider block ${textMuted}`}>{isBn ? "পাসওয়ার্ড" : "Password"}</label>
+              <input 
+                type="password"
+                required
+                placeholder="••••••••"
+                className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none focus:ring-1 focus:ring-emerald-500`}
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+              />
+            </div>
+
+            {/* Quick credentials autocompleting helpers */}
+            {authTab === "login" && (
+              <div className="p-2 py-1.5 bg-amber-500/5 hover:bg-amber-500/10 transition border border-amber-500/20 rounded-lg text-[10px] text-amber-700 dark:text-amber-300">
+                <span className="font-bold flex items-center gap-1">
+                  <Lock className="w-3 h-3 text-amber-500" />
+                  {isBn ? "পরিচালক/এডমিন লগইন বিবরণী:" : "Admin Credentials / Fill Option:"}
+                </span>
+                <button 
+                  type="button"
+                  onClick={() => {
+                    setAuthEmail("Mdjoybhuiyan134@gmail.com");
+                    setAuthPassword("Raihan@12");
+                    triggerToast(isBn ? "এডমিন ক্রেডেনশিয়াল ফিল করা হলো!" : "Filled Admin Credentials!");
+                  }}
+                  className="mt-1 font-mono hover:underline text-left block w-full text-emerald-650 dark:text-emerald-400 font-bold cursor-pointer"
+                >
+                  Email: Mdjoybhuiyan134@gmail.com<br/>
+                  Pass: Raihan@12 (Click to auto-fill)
+                </button>
+              </div>
+            )}
+
+            {authTab === "register" && (
+              <div className="p-2 py-1.5 bg-[#006A4E]/5 border border-[#006A4E]/10 rounded-lg text-[10px] text-emerald-700 dark:text-emerald-300">
+                <span className="font-bold flex items-center gap-1">
+                  <UserCheck className="w-3 h-3 text-[#006A4E] dark:text-emerald-400" />
+                  {isBn ? "এডমিন একাউন্ট খুলতে চান?" : "Want to create Admin account?"}
+                </span>
+                <p className="mt-1">
+                  {isBn ? "Mdjoybhuiyan134@gmail.com ইমেইল এবং Raihan@12 পাসওয়ার্ড দিয়ে নতুন আইডি খুলুন। এটি স্বয়ংক্রিয়ভাবে এডমিন এক্সেস পাবে।" : "Register using the email 'Mdjoybhuiyan134@gmail.com' and password 'Raihan@12' to gain highest administrative powers."}
+                </p>
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={authLoading}
+              className={`w-full py-2.5 rounded-xl font-bold transition text-white shadow-md mt-2 cursor-pointer flex items-center justify-center gap-1.5 ${
+                authLoading ? "bg-emerald-800 opacity-80 cursor-not-allowed" : "bg-[#006A4E] hover:bg-emerald-700 active:scale-[0.99]"
+              }`}
+            >
+              {authLoading && (
+                <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              )}
+              {authTab === "login" 
+                ? (isBn ? "প্রবেশ করুন (লগইন)" : "Secure Sign In")
+                : (isBn ? "অ্যাকাউন্ট তৈরি করুন" : "Register Digital ID")
+              }
+            </button>
+          </form>
+
+          {/* Federated Auth Options */}
+          <div className="relative my-1 flex items-center justify-center">
+            <span className="absolute w-full h-[1px] bg-slate-200 dark:bg-slate-800" />
+            <span className={`relative px-3 bg-white dark:bg-[#161B26] text-[10px] font-bold ${textMuted} uppercase tracking-wider`}>
+              {isBn ? "অথবা" : "or"}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                setAuthLoading(true);
+                await signInWithPopup(auth, googleAuthProvider);
+                triggerToast(isBn ? "গুগল সাইন-ইন সফল হয়েছে!" : "Successfully logged in with Google!");
+              } catch (err: any) {
+                setAuthError(err.message || "Google authentication failed.");
+              } finally {
+                setAuthLoading(false);
+              }
+            }}
+            className={`w-full py-2.5 border ${borderCol} rounded-xl font-bold transition hover:bg-slate-100 dark:hover:bg-slate-900 ${textPrimary} text-xs flex items-center justify-center gap-2 cursor-pointer`}
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24">
+              <path fill="#ea4335" d="M12 5.04c1.7 0 3.2.6 4.4 1.8l3.3-3.3C17.7 1.4 15 0 12 0 7.3 0 3.3 2.7 1.4 6.6l3.9 3C6.2 6.8 8.9 5.04 12 5.04z" />
+              <path fill="#4285f4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.4h6.5c-.3 1.5-1.1 2.8-2.4 3.6l3.7 2.9c2.2-2 3.7-5 3.7-8.6z" />
+              <path fill="#fbbc05" d="M5.3 14.4c-.2-.7-.4-1.5-.4-2.4s.2-1.7.4-2.4l-3.9-3C.5 8.2 0 10 0 12s.5 3.8 1.4 5.4l3.9-3z" />
+              <path fill="#34a853" d="M12 24c3.2 0 6-1 8-2.9l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.1 0-5.8-1.8-6.7-4.6l-3.9 3c1.9 3.9 5.9 6.2 10 6.2z" />
+            </svg>
+            {isBn ? "গুগল অ্যাকাউন্ট দিয়ে লগইন" : "Continue with Google"}
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`min-h-screen ${bg} transition-colors duration-300 font-sans flex items-center justify-center py-0 md:py-4 lg:py-8`}>
@@ -505,6 +1284,36 @@ export default function App() {
               >
                 {dark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
               </button>
+
+              {/* User Auth Portal */}
+              {user ? (
+                <div className="flex items-center gap-2 pl-1 border-l border-emerald-800">
+                  <div className="hidden sm:flex flex-col text-right">
+                    <span className="text-[10px] text-white font-bold leading-none max-w-[80px] truncate">
+                      {user.displayName || user.email?.split("@")[0]}
+                    </span>
+                    {syncing && <span className="text-[8px] text-emerald-300 font-mono tracking-tighter">Syncing...</span>}
+                  </div>
+                  <button
+                    onClick={() => signOut(auth)}
+                    className="p-1 px-2 text-[10px] bg-red-600 hover:bg-red-700 text-white rounded font-bold uppercase tracking-wider transition shrink-0 shadow-sm cursor-pointer"
+                  >
+                    {isBn ? "লগআউট" : "Logout"}
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => {
+                    setAuthTab("login");
+                    setAuthError("");
+                    setShowAuthModal(true);
+                  }}
+                  className="p-1 px-2.5 text-[10px] bg-emerald-900 border border-emerald-600 hover:bg-emerald-800 text-emerald-100 hover:text-white rounded font-bold uppercase tracking-wider transition flex items-center gap-1 shrink-0 shadow-sm cursor-pointer"
+                >
+                  <Star className="w-3 h-3 text-amber-400 inline" />
+                  {isBn ? "লগইন" : "Login"}
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -516,30 +1325,36 @@ export default function App() {
             {isBn ? "সর্বশেষ আপডেট: ১৮ জানুয়ারি ২০২৪" : "Last Updated: 18 January 2024"}
           </div>
           <div className="flex items-center gap-6 font-semibold text-xs text-slate-500 dark:text-slate-400">
-            {[
-              { id: "home", label: "Dashboard", labelBn: "ড্যাশবোর্ড" },
-              { id: "book", label: "Laws Directory", labelBn: "আইনসমূহ" },
-              { id: "search", label: "Search Engine", labelBn: "অনুসন্ধান" },
-              { id: "bookmark", label: "Saved Bookmarks", labelBn: "বুকমার্ক" },
-              { id: "star", label: "Favorites Checklist", labelBn: "প্রিয় তালিকা" }
-            ].map((nav) => {
-              const active = tab === nav.id && !selectedLaw && !selectedSection;
-              return (
-                <button
-                  key={nav.id}
-                  onClick={() => {
-                    setSelectedLaw(null);
-                    setSelectedSection(null);
-                    setTab(nav.id);
-                  }}
-                  className={`transition-colors duration-150 hover:text-[#006A4E] dark:hover:text-emerald-400 ${
-                    active ? "text-[#006A4E] dark:text-emerald-400 font-bold border-b-2 border-[#006A4E] dark:border-emerald-400 pb-1" : ""
-                  }`}
-                >
-                  {isBn ? nav.labelBn : nav.label}
-                </button>
-              );
-            })}
+            {(() => {
+              const items = [
+                { id: "home", label: "Dashboard", labelBn: "ড্যাশবোর্ড" },
+                { id: "book", label: "Laws Directory", labelBn: "আইনসমূহ" },
+                { id: "search", label: "Search Engine", labelBn: "অনুসন্ধান" },
+                { id: "bookmark", label: "Saved Bookmarks", labelBn: "বুকমার্ক" },
+                { id: "star", label: "Favorites Checklist", labelBn: "প্রিয় তালিকা" }
+              ];
+              if (userRole === "admin") {
+                items.push({ id: "admin", label: "Admin Center", labelBn: "এডমিন প্যানেল" });
+              }
+              return items.map((nav) => {
+                const active = tab === nav.id && !selectedLaw && !selectedSection;
+                return (
+                  <button
+                    key={nav.id}
+                    onClick={() => {
+                      setSelectedLaw(null);
+                      setSelectedSection(null);
+                      setTab(nav.id);
+                    }}
+                    className={`transition-colors duration-150 hover:text-[#006A4E] dark:hover:text-emerald-400 ${
+                      active ? "text-[#006A4E] dark:text-emerald-400 font-bold border-b-2 border-[#006A4E] dark:border-emerald-400 pb-1" : ""
+                    }`}
+                  >
+                    {isBn ? nav.labelBn : nav.label}
+                  </button>
+                );
+              });
+            })()}
           </div>
         </nav>
 
@@ -552,7 +1367,7 @@ export default function App() {
               {isBn ? "আইনের তালিকা (Laws)" : "Statutes Directory"}
             </div>
             <div className="flex-grow divide-y divide-slate-100 dark:divide-slate-800">
-              {LAWS.map((law) => {
+              {allLaws.map((law) => {
                 const isActive = selectedLaw === law.id;
                 return (
                   <div
@@ -934,6 +1749,26 @@ export default function App() {
                   </button>
 
                   <button 
+                    onClick={() => {
+                      setEditForm({
+                        title: selectedSection.title || "",
+                        titleBn: selectedSection.titleBn || "",
+                        text: selectedSection.text || "",
+                        textBn: selectedSection.textBn || "",
+                        explanation: selectedSection.explanation || "",
+                        explanationBn: selectedSection.explanationBn || "",
+                        example: selectedSection.example || "",
+                        exampleBn: selectedSection.exampleBn || ""
+                      });
+                      setIsEditingSection(true);
+                    }}
+                    className="p-3 rounded-xl border border-emerald-800/30 bg-emerald-500/5 hover:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-bold text-xs flex items-center justify-center gap-2 transition-all col-span-2"
+                  >
+                    <Scale className="w-4 h-4 text-emerald-500" />
+                    {isBn ? "ধারা সংশোধন ও নিজস্ব উদাহরণ যোগ" : "Edit Title, Description & Example"}
+                  </button>
+
+                  <button 
                     onClick={() => handleShareSection(selectedSection)}
                     className={`p-2 py-2.5 rounded-lg bg-emerald-800/15 text-emerald-400 border border-emerald-900/40 hover:bg-emerald-800/25 transition font-bold text-xs flex items-center justify-center gap-1.5 col-span-2`}
                   >
@@ -949,7 +1784,7 @@ export default function App() {
           {selectedLaw && !selectedSection && (
             <div>
               {(() => {
-                const law = LAWS.find((l) => l.id === selectedLaw);
+                const law = allLaws.find((l) => l.id === selectedLaw);
                 if (!law) return <p className="p-4 text-destructive">Law not found</p>;
                 return (
                   <div className="flex flex-col">
@@ -1248,7 +2083,7 @@ export default function App() {
                     <div className="bg-emerald-950/45 border border-emerald-800/50 rounded-xl p-3 grid grid-cols-3 gap-2 text-center text-white">
                       <div>
                         <span className="text-base font-bold font-serif tracking-tight block">
-                          {LAWS.length}
+                          {allLaws.length}
                         </span>
                         <span className="text-[10px] text-emerald-200 block">
                           {isBn ? "আইন গ্রন্থ" : "Statutes"}
@@ -1281,7 +2116,7 @@ export default function App() {
                       </span>
                     </div>
                     <div className="flex gap-2.5 overflow-x-auto pb-2 scrollbar-none">
-                      {LAWS.map((law) => (
+                      {allLaws.map((law) => (
                         <div
                           key={law.id}
                           onClick={() => setSelectedLaw(law.id)}
@@ -1386,6 +2221,493 @@ export default function App() {
                 </div>
               )}
 
+              {/* TAB ADMIN: HIGH-TECH RBAC ADMIN CENTER */}
+              {tab === "admin" && userRole === "admin" && (
+                <div className="p-4 space-y-4">
+                  
+                  {/* Title Banner */}
+                  <div className="flex justify-between items-center pb-2 border-b border-dashed border-slate-200 dark:border-slate-800">
+                    <div>
+                      <h3 className={`text-base font-bold ${textPrimary} flex items-center gap-1.5`}>
+                        <Shield className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
+                        {isBn ? "প্রশাসনিক নিয়ন্ত্রণ কেন্দ্র" : "Administrative Control Center"}
+                      </h3>
+                      <p className={`text-[10px] ${textMuted} mt-0.5`}>
+                        {isBn ? "সদস্যদের ভূমিকা এবং আইন ও বিধিমালার বিবরণী পরিচালন কেন্দ্র" : "Manage roles, compile dynamic law clauses, and inspect user directory"}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Inner sub-tabs inside Admin panel */}
+                  <div className="flex bg-slate-100 dark:bg-slate-900 p-1 rounded-xl gap-1">
+                    {[
+                      { id: "users", label: "Users Directory", labelBn: "ব্যবহারকারী তালিকা" },
+                      { id: "laws", label: "Add Custom Law", labelBn: "নতুন আইন নিবন্ধন" },
+                      { id: "sections", label: "Add Custom Clause", labelBn: "নতুন ধারা যুক্তকরণ" }
+                    ].map((btn) => (
+                      <button
+                        key={btn.id}
+                        onClick={() => setAdminTab(btn.id as any)}
+                        className={`flex-1 py-2 text-[10px] font-bold rounded-lg transition-all ${
+                          adminTab === btn.id
+                            ? "bg-white dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 shadow-sm"
+                            : `${textMuted} hover:text-slate-800 dark:hover:text-slate-100`
+                        }`}
+                      >
+                        {isBn ? btn.labelBn : btn.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* SUB-PANEL 1: USER RBAC ROLES CONTROL */}
+                  {adminTab === "users" && (
+                    <div className={`p-4 rounded-2xl ${surface} border ${borderCol} space-y-3.5`}>
+                      <h4 className={`text-xs font-bold uppercase tracking-wider ${textPrimary}`}>
+                        {isBn ? "নিবন্ধিত ব্যবহারকারীদের ভূমিকা পরিবর্তন" : "Registered Users RBAC Controller"}
+                      </h4>
+                      {loadingAdminUsers ? (
+                        <div className="py-8 text-center text-xs text-slate-400 animate-pulse">
+                          {isBn ? "ব্যবহারকারী তালিকা লোড হচ্ছে..." : "Loading user directory..."}
+                        </div>
+                      ) : adminUsersList.length === 0 ? (
+                        <div className="py-8 text-center text-xs text-slate-400">
+                          {isBn ? "কোনো ব্যবহারকারী পাওয়া যায়নি।" : "No registered users located in database."}
+                        </div>
+                      ) : (
+                        <div className="space-y-2.5 overflow-y-auto max-h-[50vh] pr-1">
+                          {adminUsersList.map((usr) => (
+                            <div 
+                              key={usr.id} 
+                              className={`p-3 rounded-xl ${surfaceAlt} border ${borderCol} flex flex-col sm:flex-row justify-between sm:items-center gap-2`}
+                            >
+                              <div className="min-w-0">
+                                <span className={`text-xs font-bold block ${textPrimary} truncate`}>
+                                  {usr.email}
+                                </span>
+                                <span className="text-[9px] text-slate-400 min-w-0 font-mono tracking-tighter block mt-0.5">
+                                  UID: {usr.uid} | Joint: {new Date(usr.createdAt).toLocaleDateString()}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <span className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase font-mono border ${
+                                  usr.role === "admin" 
+                                    ? "bg-rose-500/10 text-rose-500 border-rose-500/20" 
+                                    : usr.role === "moderator" 
+                                    ? "bg-amber-500/10 text-amber-500 border-amber-500/20"
+                                    : "bg-slate-500/10 text-slate-500 border-slate-500/20"
+                                }`}>
+                                  {usr.role}
+                                </span>
+                                
+                                {/* Quick role selectors */}
+                                <select
+                                  value={usr.role}
+                                  onChange={(e) => updateUserRoleInDb(usr.id, e.target.value)}
+                                  className={`p-1 px-1.5 text-[10px] rounded-md outline-none border ${borderCol} bg-white dark:bg-slate-900 ${textPrimary}`}
+                                >
+                                  <option value="user">Make User</option>
+                                  <option value="moderator">Make Moderator</option>
+                                  <option value="admin">Make Admin</option>
+                                </select>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* SUB-PANEL 2: REGISTER DYNAMIC LAW */}
+                  {adminTab === "laws" && (
+                    <form 
+                      onSubmit={async (e) => {
+                        e.preventDefault();
+                        if (!lawFormId || !lawFormTitle || !lawFormTitleBn || !lawFormCode) {
+                          return triggerToast(isBn ? "প্রয়োজনীয় সকল ঘর পূরণ করুন!" : "Please fill required core parameters.");
+                        }
+                        try {
+                          const token = await user?.getIdToken();
+                          const r = await fetch("/api/dynamic-laws", {
+                            method: "POST",
+                            headers: {
+                              "Content-Type": "application/json",
+                              "Authorization": `Bearer ${token}`
+                            },
+                            body: JSON.stringify({
+                              lawId: lawFormId.toLowerCase().trim(),
+                              title: lawFormTitle.trim(),
+                              titleBn: lawFormTitleBn.trim(),
+                              code: lawFormCode.toUpperCase().trim(),
+                              icon: lawFormIcon.trim(),
+                              category: lawFormCategory,
+                              description: lawFormDesc.trim(),
+                              descriptionBn: lawFormDescBn.trim()
+                            })
+                          });
+                          if (r.ok) {
+                            triggerToast(isBn ? "নতুন আইন সফলভাবে যুক্ত হয়েছে!" : "Successfully registered new legal statute!");
+                            loadDynamicDatabase();
+                            // Reset form
+                            setLawFormId("");
+                            setLawFormTitle("");
+                            setLawFormTitleBn("");
+                            setLawFormCode("");
+                            setLawFormDesc("");
+                            setLawFormDescBn("");
+                          } else {
+                            const err = await r.json();
+                            triggerToast(err.error || "Failed to create law.");
+                          }
+                        } catch (err: any) {
+                          console.error(err);
+                          triggerToast("Server connection error.");
+                        }
+                      }}
+                      className={`p-4 rounded-2xl ${surface} border ${borderCol} space-y-3.5 text-xs`}
+                    >
+                      <h4 className={`text-xs font-bold uppercase tracking-wider ${textPrimary}`}>
+                        {isBn ? "কোন নতুন সংবিধিবদ্ধ আইন যুক্ত করুন" : "Register a New Custom Statute"}
+                      </h4>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <label className={`font-semibold block ${textMuted}`}>Law Identifier (unique lowercase, e.g. bpc1860)</label>
+                          <input 
+                            type="text" required placeholder="e.g. dsda2018"
+                            className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none`}
+                            value={lawFormId} onChange={(e) => setLawFormId(e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className={`font-semibold block ${textMuted}`}>Acronym/Code (uppercase, e.g. BPC)</label>
+                          <input 
+                            type="text" required placeholder="e.g. DSDA"
+                            className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-55 dark:bg-slate-900 ${textPrimary} outline-none`}
+                            value={lawFormCode} onChange={(e) => setLawFormCode(e.target.value)}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <label className={`font-semibold block ${textMuted}`}>Title (English)</label>
+                          <input 
+                            type="text" required placeholder="e.g. Digital Security Act, 2018"
+                            className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none`}
+                            value={lawFormTitle} onChange={(e) => setLawFormTitle(e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className={`font-semibold block ${textMuted}`}>Title (Bengali)</label>
+                          <input 
+                            type="text" required placeholder="যেমন: ডিজিটাল নিরাপত্তা আইন, ২০১৮"
+                            className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none`}
+                            value={lawFormTitleBn} onChange={(e) => setLawFormTitleBn(e.target.value)}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <label className={`font-semibold block ${textMuted}`}>Icon / Emblem</label>
+                          <select 
+                            className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none`}
+                            value={lawFormIcon} onChange={(e) => setLawFormIcon(e.target.value)}
+                          >
+                            <option value="Scale">⚖️ Scale (ন্যায়দণ্ড)</option>
+                            <option value="Shield">🛡️ Shield (নিরাপত্তা)</option>
+                            <option value="Book">📖 Book (আইনগ্রন্থ)</option>
+                            <option value="Lock">🔒 Lock (সাইবার/দণ্ড)</option>
+                            <option value="FileText">📄 FileText (দস্তাবেজ)</option>
+                            <option value="Globe">🌐 Globe (আন্তর্জাতিক)</option>
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <label className={`font-semibold block ${textMuted}`}>Category Segment</label>
+                          <select
+                            className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none`}
+                            value={lawFormCategory} onChange={(e) => setLawFormCategory(e.target.value)}
+                          >
+                            {CATEGORIES.filter(c => c !== "All").map(c => (
+                              <option key={c} value={c}>{c}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className={`font-semibold block ${textMuted}`}>Brief Description (English)</label>
+                        <textarea 
+                          rows={2} placeholder="statutory summary..."
+                          className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none`}
+                          value={lawFormDesc} onChange={(e) => setLawFormDesc(e.target.value)}
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className={`font-semibold block ${textMuted}`}>Brief Description (Bengali)</label>
+                        <textarea 
+                          rows={2} placeholder="সংবাদ বা বর্ণনা..."
+                          className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none`}
+                          value={lawFormDescBn} onChange={(e) => setLawFormDescBn(e.target.value)}
+                        />
+                      </div>
+
+                      <button 
+                        type="submit"
+                        className="p-3 bg-emerald-600 hover:bg-[#006A4E] text-white font-bold rounded-xl transition shadow cursor-pointer w-full"
+                      >
+                        {isBn ? "আইন গ্রন্থটি ডাটাবেজে সংরক্ষণ করুন" : "Register Custom Law into PostgreSQL"}
+                      </button>
+                    </form>
+                  )}
+
+                  {/* SUB-PANEL 3: REGISTER DYNAMIC CLAUSE SECTION */}
+                  {adminTab === "sections" && (
+                    <form 
+                      onSubmit={async (e) => {
+                        e.preventDefault();
+                        if (!secFormLawId || !secFormId || !secFormNum || !secFormTitle || !secFormTitleBn) {
+                          return triggerToast(isBn ? " ধারা আইডি, নম্বর, শিরোনাম এবং সংশ্লিষ্ট আইন সিলেক্ট করা আবশ্যক!" : "Please fill out required section metrics.");
+                        }
+                        try {
+                          const token = await user?.getIdToken();
+                          const r = await fetch("/api/dynamic-sections", {
+                            method: "POST",
+                            headers: {
+                              "Content-Type": "application/json",
+                              "Authorization": `Bearer ${token}`
+                            },
+                            body: JSON.stringify({
+                              sectionId: secFormId.toLowerCase().trim(),
+                              lawId: secFormLawId.trim(),
+                              num: parseInt(secFormNum) || 0,
+                              title: secFormTitle.trim(),
+                              titleBn: secFormTitleBn.trim(),
+                              text: secFormText.trim(),
+                              textBn: secFormTextBn.trim(),
+                              explanation: secFormExplanation.trim(),
+                              explanationBn: secFormExplanationBn.trim(),
+                              example: secFormExample.trim(),
+                              exampleBn: secFormExampleBn.trim()
+                            })
+                          });
+                          if (r.ok) {
+                            triggerToast(isBn ? "নতুন ধারাটি সফলভাবে যুক্ত হয়েছে!" : "Dynamic Clause Clause registered successfully!");
+                            loadDynamicDatabase();
+                            // Reset form fields
+                            setSecFormId("");
+                            setSecFormNum("");
+                            setSecFormTitle("");
+                            setSecFormTitleBn("");
+                            setSecFormText("");
+                            setSecFormTextBn("");
+                            setSecFormExplanation("");
+                            setSecFormExplanationBn("");
+                            setSecFormExample("");
+                            setSecFormExampleBn("");
+                          } else {
+                            const err = await r.json();
+                            triggerToast(err.error || "Failed to save clause.");
+                          }
+                        } catch (err) {
+                          console.error(err);
+                          triggerToast("Server connection error.");
+                        }
+                      }}
+                      className={`p-4 rounded-2xl ${surface} border ${borderCol} space-y-3.5 text-xs`}
+                    >
+                      <h4 className={`text-xs font-bold uppercase tracking-wider ${textPrimary}`}>
+                        {isBn ? "কোন আইনের অধীনে নতুন ধারা বা বিবরণী যুক্ত করুন" : "Add a Dynamic Clause Clause"}
+                      </h4>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <label className={`font-semibold block ${textMuted}`}>Select Parent Statute *</label>
+                          <select 
+                            required
+                            className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none font-bold`}
+                            value={secFormLawId} onChange={(e) => setSecFormLawId(e.target.value)}
+                          >
+                            <option value="">-- Choose Law Code --</option>
+                            {allLaws.map(law => (
+                              <option key={law.id} value={law.id}>{law.code} - {isBn ? law.titleBn : law.title}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <label className={`font-semibold block ${textMuted}`}>Section Identifier (lowercase, e.g. bpc_sec_302) *</label>
+                          <input 
+                            type="text" required placeholder="e.g. bpc_sec_302"
+                            className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-55 dark:bg-slate-900 ${textPrimary} outline-none`}
+                            value={secFormId} onChange={(e) => setSecFormId(e.target.value)}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div className="space-y-1">
+                          <label className={`font-semibold block ${textMuted}`}>Clause Number (Integer) *</label>
+                          <input 
+                            type="number" required placeholder="e.g. 302"
+                            className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none`}
+                            value={secFormNum} onChange={(e) => setSecFormNum(e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-1 sm:col-span-2">
+                          <label className={`font-semibold block ${textMuted}`}>Clause Title (English) *</label>
+                          <input 
+                            type="text" required placeholder="e.g. Punishment for Murder"
+                            className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none`}
+                            value={secFormTitle} onChange={(e) => setSecFormTitle(e.target.value)}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className={`font-semibold block ${textMuted}`}>Clause Title (Bengali) *</label>
+                        <input 
+                          type="text" required placeholder="যেমন: হত্যার শাস্তি"
+                          className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-55 dark:bg-slate-900 ${textPrimary} outline-none`}
+                          value={secFormTitleBn} onChange={(e) => setSecFormTitleBn(e.target.value)}
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <label className={`font-semibold block ${textMuted}`}>Statutory Clause Text (English)</label>
+                          <textarea 
+                            rows={3} placeholder="Official legal text..."
+                            className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none`}
+                            value={secFormText} onChange={(e) => setSecFormText(e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className={`font-semibold block ${textMuted}`}>Statutory Clause Text (Bengali)</label>
+                          <textarea 
+                            rows={3} placeholder="ধারাটির অফিসিয়াল মূল আইনগত লেখা..."
+                            className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none`}
+                            value={secFormTextBn} onChange={(e) => setSecFormTextBn(e.target.value)}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <label className={`font-semibold block ${textMuted}`}>Detailed Legal Explanation (English)</label>
+                          <textarea 
+                            rows={3} placeholder="Explain purpose & clausal guidelines..."
+                            className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none`}
+                            value={secFormExplanation} onChange={(e) => setSecFormExplanation(e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className={`font-semibold block ${textMuted}`}>Detailed Legal Explanation (Bengali)</label>
+                          <textarea 
+                            rows={3} placeholder="বিস্তারিত বিশ্লেষণ..."
+                            className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none`}
+                            value={secFormExplanationBn} onChange={(e) => setSecFormExplanationBn(e.target.value)}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <label className={`font-semibold block ${textMuted}`}>Practical Illustration Scenario (English)</label>
+                          <textarea 
+                            rows={3} placeholder="Describe a specific case precedent study..."
+                            className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none`}
+                            value={secFormExample} onChange={(e) => setSecFormExample(e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className={`font-semibold block ${textMuted}`}>Practical Illustration Scenario (Bengali)</label>
+                          <textarea 
+                            rows={3} placeholder="মামলার বাস্তবধর্মী দৃষ্টান্ত..."
+                            className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-55 dark:bg-slate-900 ${textPrimary} outline-none`}
+                            value={secFormExampleBn} onChange={(e) => setSecFormExampleBn(e.target.value)}
+                          />
+                        </div>
+                      </div>
+
+                      <button 
+                        type="submit"
+                        className="p-3 bg-[#006A4E] hover:bg-emerald-700 text-white font-bold rounded-xl transition shadow cursor-pointer w-full"
+                      >
+                        {isBn ? "ধারাটি ডাটাবেজে যুক্ত করুন" : "Register Custom Clause in PostgreSQL"}
+                      </button>
+                    </form>
+                  )}
+
+                  {/* Clean Separation Card list of active custom database items */}
+                  <div className={`p-4 rounded-2xl ${surface} border ${borderCol} space-y-3`}>
+                    <h4 className={`text-xs font-bold uppercase tracking-wider ${textPrimary}`}>
+                      {isBn ? "বিদ্যমান ডাইনামিক ডেটা তালিকা" : "Existing Registered Custom Items"}
+                    </h4>
+                    <div className="space-y-2">
+                      <div className="text-[10px] font-bold text-emerald-600 block">
+                        Custom Laws ({dynamicLawsList.length})
+                      </div>
+                      {dynamicLawsList.map(dl => (
+                        <div key={dl.lawId} className={`p-2.5 text-xs rounded-xl ${surfaceAlt} border ${borderCol} flex justify-between items-center`}>
+                          <div>
+                            <span className="font-bold">{isBn ? dl.titleBn : dl.title}</span>
+                            <span className="font-mono text-[9px] text-slate-400 block mt-0.5">ID: {dl.lawId} | Code: {dl.code}</span>
+                          </div>
+                          <button
+                            onClick={async () => {
+                              if (!confirm("Are you sure you want to delete this custom law and its sections?")) return;
+                              const token = await user?.getIdToken();
+                              const r = await fetch(`/api/dynamic-laws/${dl.lawId}`, {
+                                method: "DELETE",
+                                headers: { "Authorization": `Bearer ${token}` }
+                              });
+                              if (r.ok) {
+                                triggerToast("Dynamic law deleted.");
+                                loadDynamicDatabase();
+                              }
+                            }}
+                            className="p-1 px-2 rounded-lg bg-red-100 hover:bg-red-200 dark:bg-red-950/20 text-red-600 dark:text-red-400 font-bold text-[10px] cursor-pointer"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      ))}
+
+                      <div className="text-[10px] font-bold text-emerald-600 block mt-3">
+                        Custom Subsections/Clauses ({dynamicSectionsList.length})
+                      </div>
+                      {dynamicSectionsList.map(ds => (
+                        <div key={ds.sectionId} className={`p-2.5 text-xs rounded-xl ${surfaceAlt} border ${borderCol} flex justify-between items-center`}>
+                          <div>
+                            <span className="font-bold">§ {ds.num}: {isBn ? ds.titleBn : ds.title}</span>
+                            <span className="font-mono text-[9px] text-slate-400 block mt-0.5">Parent Law ID: {ds.lawId}</span>
+                          </div>
+                          <button
+                            onClick={async () => {
+                              if (!confirm("Are you sure you want to delete this custom section?")) return;
+                              const token = await user?.getIdToken();
+                              const r = await fetch(`/api/dynamic-sections/${ds.sectionId}`, {
+                                method: "DELETE",
+                                headers: { "Authorization": `Bearer ${token}` }
+                              });
+                              if (r.ok) {
+                                triggerToast("Dynamic section deleted.");
+                                loadDynamicDatabase();
+                              }
+                            }}
+                            className="p-1 px-2 rounded-lg bg-red-100 hover:bg-red-200 dark:bg-red-950/20 text-red-600 dark:text-red-400 font-bold text-[10px] cursor-pointer"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                </div>
+              )}
+
               {/* TAB 2: LAWS CATALOG PAGE */}
               {tab === "book" && (
                 <div className="p-4 space-y-4">
@@ -1393,7 +2715,7 @@ export default function App() {
                     <h3 className={`text-base font-bold ${textPrimary}`}>
                       {isBn ? "আইন গ্রন্থ ও আইন সংকলন" : "Laws & Legal Codes"}
                     </h3>
-                    <span className={`text-xs font-mono ${textMuted}`}>{LAWS.length} Codes</span>
+                    <span className={`text-xs font-mono ${textMuted}`}>{allLaws.length} Codes</span>
                   </div>
 
                   {/* Category Pills Slider */}
@@ -1417,7 +2739,7 @@ export default function App() {
 
                   {/* Law Catalog Cards Listing */}
                   <div className="space-y-3.5">
-                    {LAWS.filter((l) => filterCat === "All" || l.category === filterCat).map((law) => (
+                    {allLaws.filter((l) => filterCat === "All" || l.category === filterCat).map((law) => (
                       <div
                         key={law.id}
                         onClick={() => setSelectedLaw(law.id)}
@@ -1854,47 +3176,429 @@ export default function App() {
           </div>
         )}
 
-        {/* 4. NAVIGATION BAR (STICKY FOOTER FRAME) */}
-        <div className={`absolute bottom-0 inset-x-0 h-16 lg:hidden ${surface} border-t ${borderCol} grid grid-cols-5 z-20 shrink-0 select-none shadow-lg px-2`}>
-          {[
-            { id: "home", label: "Home", labelBn: "প্রধান", icon: Home },
-            { id: "book", label: "Laws", labelBn: "আইন গ্রন্থ", icon: Book },
-            { id: "search", label: "Search", labelBn: "অনুসন্ধান", icon: Search },
-            { id: "bookmark", label: "Saved", labelBn: "বুকমার্ক", icon: Bookmark },
-            { id: "star", label: "Favorites", labelBn: "প্রিয় তালিকা", icon: Star }
-          ].map((nav) => {
-            const IconComponent = nav.icon;
-            const active = tab === nav.id && !selectedLaw && !selectedSection;
-            return (
-              <button
-                key={nav.id}
-                onClick={() => {
-                  setSelectedLaw(null);
-                  setSelectedSection(null);
-                  setTab(nav.id);
-                  setShowNotifications(false);
-                }}
-                className={`flex flex-col items-center justify-center gap-1.5 transition-colors duration-200 outline-none ${
-                  active ? "text-[#006A4E] dark:text-emerald-400 font-bold" : textMuted
-                }`}
+        {/* 3.4.5. MODAL: UNIQUE DIGITAL AUTHENTICATION PORTAL */}
+        {showAuthModal && (
+          <div className="absolute inset-0 bg-black/70 z-50 flex items-center justify-center p-4 transition-all">
+            <div className={`w-full max-w-md ${surface} rounded-2xl shadow-2xl p-6 border ${borderCol} flex flex-col gap-4 animate-fade-in relative overflow-hidden`}>
+              
+              {/* Background glowing ornaments for a high-tech judicial look */}
+              <div className="absolute -top-12 -left-12 w-32 h-32 bg-emerald-500/10 rounded-full blur-2xl" />
+              <div className="absolute -bottom-12 -right-12 w-32 h-32 bg-amber-500/10 rounded-full blur-2xl" />
+
+              {/* Close Button */}
+              <button 
+                onClick={() => setShowAuthModal(false)}
+                className={`absolute top-4 right-4 p-1.5 rounded-lg ${surfaceAlt} ${textPrimary} hover:text-rose-500 transition cursor-pointer`}
               >
-                <div className="relative">
-                  <IconComponent className="w-5 h-5 leading-none block" />
-                  {nav.id === "bookmark" && bookmarks.length > 0 && (
-                    <span className="absolute -top-1 -right-1 text-[8px] bg-amber-500 text-slate-950 font-bold font-mono h-3.5 w-3.5 flex items-center justify-center rounded-full">
-                      {bookmarks.length}
-                    </span>
-                  )}
-                  {nav.id === "star" && favorites.length > 0 && (
-                    <span className="absolute -top-1 -right-1.5 w-2 h-2 rounded-full bg-rose-500" />
+                <X className="w-4 h-4" />
+              </button>
+
+              {/* Branding Header */}
+              <div className="text-center pt-2">
+                <div className="mx-auto w-12 h-12 bg-emerald-150/15 text-emerald-600 dark:text-emerald-400 rounded-full flex items-center justify-center mb-2 shadow-sm border border-emerald-500/20">
+                  <Shield className="w-5 h-5" />
+                </div>
+                <h3 className={`font-bold text-lg leading-tight ${textPrimary}`}>
+                  {isBn ? "বাংলাদেশ আইন সহায়িকা পোর্টাল" : "Bangladesh Law Guide Portal"}
+                </h3>
+                <p className={`text-xs ${textMuted} mt-1`}>
+                  {isBn ? "ডিজিটাল ও নিরাপদ নাগরিক আইনি হাব" : "Secure Digital Citizen Law Portal"}
+                </p>
+              </div>
+
+              {/* Tabs for Login & Register */}
+              <div className="grid grid-cols-2 p-1 bg-slate-100 dark:bg-slate-900 rounded-xl gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthTab("login");
+                    setAuthError("");
+                  }}
+                  className={`py-2 text-xs font-bold rounded-lg transition-all ${
+                    authTab === "login" 
+                      ? "bg-white dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 shadow-sm"
+                      : `${textMuted} hover:text-slate-800 dark:hover:text-slate-200`
+                  }`}
+                >
+                  {isBn ? "লগইন" : "Log In"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthTab("register");
+                    setAuthError("");
+                  }}
+                  className={`py-2 text-xs font-bold rounded-lg transition-all ${
+                    authTab === "register" 
+                      ? "bg-white dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 shadow-sm"
+                      : `${textMuted} hover:text-slate-800 dark:hover:text-slate-200`
+                  }`}
+                >
+                  {isBn ? "নতুন আইডি খুলুন" : "Create Account"}
+                </button>
+              </div>
+
+              {/* Error messages */}
+              {authError && (
+                <div className="bg-rose-500/10 border border-rose-500/20 text-rose-600 dark:text-rose-400 p-3 rounded-xl text-xs font-bold flex flex-col items-start gap-2.5 animate-fade-in">
+                  <div className="flex items-start gap-1.5 w-full">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-rose-500 mt-0.5" />
+                    <span className="leading-normal">{authError}</span>
+                  </div>
+                  {(authError.includes("sign-in") || authError.includes("সক্রিয়")) && (
+                    <div className="mt-1 pt-2 border-t border-rose-500/20 w-full text-[10px] text-slate-700 dark:text-slate-350 flex flex-col gap-1.5 font-normal">
+                      <span className="font-bold text-slate-900 dark:text-slate-250">
+                        {isBn ? "সক্রিয় করার সহজ ধাপসমূহ:" : "How to enable this in 3 easy steps:"}
+                      </span>
+                      <ol className="list-decimal pl-4 space-y-1">
+                        <li>
+                          {isBn ? "নিচের বোতামটি দিয়ে ফায়ারবেস অথেন্টিকেশন কনসোলে যান।" : "Click the button below to open Firebase Auth console."}
+                        </li>
+                        <li>
+                          {isBn ? "'Email/Password' প্রোভাইডার নির্বাচন করুন।" : "Under 'Sign-in method', select the 'Email/Password' provider."}
+                        </li>
+                        <li>
+                          {isBn ? "প্রোভাইডারটি Enable করে সেভ (Save) করুন!" : "Enable the 'Email/Password' toggles and click 'Save'."}
+                        </li>
+                      </ol>
+                      <a 
+                        href="https://console.firebase.google.com/project/festive-strata-5jhcx/authentication/providers" 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="mt-1.5 w-full py-2 bg-rose-600 hover:bg-rose-700 dark:bg-rose-500 dark:hover:bg-rose-600 text-white font-bold rounded-lg text-center transition shadow-sm"
+                      >
+                        {isBn ? "ফায়ারবেস কনসোল খুলুন ↗" : "Open Firebase Console ↗"}
+                      </a>
+                    </div>
                   )}
                 </div>
-                <span className="text-[9px] leading-none tracking-wide text-center uppercase block font-medium">
-                  {isBn ? nav.labelBn : nav.label}
+              )}
+
+              {/* Core Submit Auth Form */}
+              <form onSubmit={handleEmailAuthSubmit} className="space-y-3.5 text-xs">
+                {authTab === "register" && (
+                  <div className="space-y-1">
+                    <label className={`font-semibold text-[11px] uppercase tracking-wider block ${textMuted}`}>{isBn ? "আপনার নাম" : "Your Name"}</label>
+                    <input 
+                      type="text"
+                      required
+                      placeholder={isBn ? "যেমন: আব্দুর রহমান" : "e.g. Abdur Rahman"}
+                      className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none focus:ring-1 focus:ring-emerald-500`}
+                      value={authName}
+                      onChange={(e) => setAuthName(e.target.value)}
+                    />
+                  </div>
+                )}
+
+                <div className="space-y-1">
+                  <label className={`font-semibold text-[11px] uppercase tracking-wider block ${textMuted}`}>{isBn ? "ইমেইল অ্যাড্রেস" : "Email Address"}</label>
+                  <input 
+                    type="email"
+                    required
+                    placeholder={isBn ? "যেমন: address@email.com" : "e.g. address@email.com"}
+                    className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none focus:ring-1 focus:ring-emerald-500`}
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className={`font-semibold text-[11px] uppercase tracking-wider block ${textMuted}`}>{isBn ? "পাসওয়ার্ড" : "Password"}</label>
+                  <input 
+                    type="password"
+                    required
+                    placeholder="••••••••"
+                    className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-50 dark:bg-slate-900 ${textPrimary} outline-none focus:ring-1 focus:ring-emerald-500`}
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                  />
+                </div>
+
+                {/* Quick Hint Admin Creds Block */}
+                {authTab === "login" && (
+                  <div className="p-2 py-1.5 bg-amber-500/5 hover:bg-amber-500/10 transition border border-amber-500/20 rounded-lg text-[10px] text-amber-700 dark:text-amber-300">
+                    <span className="font-bold flex items-center gap-1">
+                      <Lock className="w-3 h-3 text-amber-500" />
+                      {isBn ? "পরিচালক/এডমিন লগইন বিবরণী:" : "Admin Credentials / Fill Option:"}
+                    </span>
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        setAuthEmail("Mdjoybhuiyan134@gmail.com");
+                        setAuthPassword("Raihan@12");
+                        triggerToast(isBn ? "এডমিন ক্রেডেনশিয়াল ফিল করা হলো!" : "Filled Admin Credentials!");
+                      }}
+                      className="mt-1 font-mono hover:underline text-left block w-full text-emerald-650 dark:text-emerald-400 font-bold"
+                    >
+                      Email: Mdjoybhuiyan134@gmail.com<br/>
+                      Pass: Raihan@12 (Click to auto-fill)
+                    </button>
+                  </div>
+                )}
+
+                {/* Register Hint */}
+                {authTab === "register" && (
+                  <div className="p-2 py-1.5 bg-[#006A4E]/5 border border-[#006A4E]/10 rounded-lg text-[10px] text-emerald-700 dark:text-emerald-300">
+                    <span className="font-bold flex items-center gap-1">
+                      <UserCheck className="w-3 h-3 text-[#006A4E] dark:text-emerald-400" />
+                      {isBn ? "এডমিন একাউন্ট খুলতে চান?" : "Want to create Admin account?"}
+                    </span>
+                    <p className="mt-1">
+                      {isBn ? "Mdjoybhuiyan134@gmail.com ইমেইল এবং Raihan@12 পাসওয়ার্ড দিয়ে নতুন আইডি খুলুন। এটি স্বয়ংক্রিয়ভাবে এডমিন এক্সেস পাবে।" : "Register using the email 'Mdjoybhuiyan134@gmail.com' and password 'Raihan@12' to gain highest administrative powers."}
+                    </p>
+                  </div>
+                )}
+
+                {/* Action Submit Button */}
+                <button
+                  type="submit"
+                  disabled={authLoading}
+                  className={`w-full py-2.5 rounded-xl font-bold transition text-white shadow-md select-none mt-2 cursor-pointer flex items-center justify-center gap-1.5 ${
+                    authLoading ? "bg-emerald-800 opacity-80 cursor-not-allowed" : "bg-[#006A4E] hover:bg-emerald-700 active:scale-[0.99]"
+                  }`}
+                >
+                  {authLoading && (
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  )}
+                  {authTab === "login" 
+                    ? (isBn ? "প্রবেশ করুন (লগইন)" : "Secure Sign In")
+                    : (isBn ? "অ্যাকাউন্ট তৈরি করুন" : "Register Digital ID")
+                  }
+                </button>
+              </form>
+
+              {/* Secure Google Login alternative inside modal */}
+              <div className="relative my-1 flex items-center justify-center">
+                <span className="absolute w-full h-[1px] bg-slate-200 dark:bg-slate-800" />
+                <span className={`relative px-3 bg-white dark:bg-[#161B26] text-[10px] font-bold ${textMuted} uppercase tracking-wider`}>
+                  {isBn ? "অথবা" : "or"}
                 </span>
+              </div>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    setAuthLoading(true);
+                    await signInWithPopup(auth, googleAuthProvider);
+                    triggerToast(isBn ? "গুগল সাইন-ইন সফল হয়েছে!" : "Successfully logged in with Google!");
+                    setShowAuthModal(false);
+                  } catch (err: any) {
+                    setAuthError(err.message || "Google authentication failed.");
+                  } finally {
+                    setAuthLoading(false);
+                  }
+                }}
+                className={`w-full py-2.5 border ${borderCol} rounded-xl font-bold transition hover:bg-slate-100 dark:hover:bg-slate-900 ${textPrimary} text-xs flex items-center justify-center gap-2 cursor-pointer`}
+              >
+                {/* Custom Google logo */}
+                <svg className="w-4 h-4" viewBox="0 0 24 24">
+                  <path fill="#ea4335" d="M12 5.04c1.7 0 3.2.6 4.4 1.8l3.3-3.3C17.7 1.4 15 0 12 0 7.3 0 3.3 2.7 1.4 6.6l3.9 3C6.2 6.8 8.9 5.04 12 5.04z" />
+                  <path fill="#4285f4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.4h6.5c-.3 1.5-1.1 2.8-2.4 3.6l3.7 2.9c2.2-2 3.7-5 3.7-8.6z" />
+                  <path fill="#fbbc05" d="M5.3 14.4c-.2-.7-.4-1.5-.4-2.4s.2-1.7.4-2.4l-3.9-3C.5 8.2 0 10 0 12s.5 3.8 1.4 5.4l3.9-3z" />
+                  <path fill="#34a853" d="M12 24c3.2 0 6-1 8-2.9l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.1 0-5.8-1.8-6.7-4.6l-3.9 3c1.9 3.9 5.9 6.2 10 6.2z" />
+                </svg>
+                {isBn ? "গুগল অ্যাকাউন্ট দিয়ে লগইন" : "Continue with Google"}
               </button>
-            );
-          })}
+            </div>
+          </div>
+        )}
+
+        {/* 3.5. MODAL: EDIT CUSTOM CLAUSE DETAILS */}
+        {isEditingSection && selectedSection && (
+          <div className="absolute inset-0 bg-black/60 z-50 flex items-center justify-center p-4 transition-opacity">
+            <div className={`w-full max-w-lg ${surface} rounded-2xl shadow-2xl p-5 border ${borderCol} flex flex-col max-h-[85vh] gap-3 animate-fade-in`}>
+              {/* Header */}
+              <div className="flex justify-between items-center pb-2 border-b">
+                <div>
+                  <h4 className={`text-xs uppercase font-bold tracking-wider ${textMuted}`}>
+                    {isBn ? "धारा व वर्णन संशोधन করুন" : "Edit Clause Details"}
+                  </h4>
+                  <span className={`text-[10px] font-mono text-slate-400 block mt-0.5`}>
+                    {selectedSection.lawCode} § Section {selectedSection.num}
+                  </span>
+                </div>
+                <button 
+                  onClick={() => setIsEditingSection(false)}
+                  className={`p-1.5 rounded-lg ${surfaceAlt} ${textPrimary}`}
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Form Content - Scrollable */}
+              <div className="flex-1 overflow-y-auto space-y-4 pr-1 scrollbar-thin text-xs">
+                
+                {/* 1. SECTION TITLE ACCELERATOR */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <label className={`font-semibold block ${textMuted}`}>{isBn ? "শিরোনাম (বাংলা)" : "Title (Bengali)"}</label>
+                    <input 
+                      type="text"
+                      className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-100 dark:bg-slate-900 ${textPrimary} outline-none focus:ring-1 focus:ring-emerald-500`}
+                      value={editForm.titleBn}
+                      onChange={(e) => setEditForm({ ...editForm, titleBn: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className={`font-semibold block ${textMuted}`}>{isBn ? "শিরোনাম (ইংরেজি)" : "Title (English)"}</label>
+                    <input 
+                      type="text"
+                      className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-100 dark:bg-slate-900 ${textPrimary} outline-none focus:ring-1 focus:ring-emerald-500`}
+                      value={editForm.title}
+                      onChange={(e) => setEditForm({ ...editForm, title: e.target.value })}
+                    />
+                  </div>
+                </div>
+
+                {/* 2. DESCRIPTION TEXT BODY LIMITS */}
+                <div className="space-y-1">
+                  <label className={`font-semibold block ${textMuted}`}>{isBn ? "ধারা প্রবিধান ও বর্ণনা (বাংলা)" : "Description / Text (Bengali)"}</label>
+                  <textarea 
+                    rows={3}
+                    className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-100 dark:bg-slate-900 ${textPrimary} outline-none focus:ring-1 focus:ring-emerald-500 resize-none`}
+                    value={editForm.textBn}
+                    onChange={(e) => setEditForm({ ...editForm, textBn: e.target.value })}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className={`font-semibold block ${textMuted}`}>{isBn ? "ধারা প্রবিধান ও বর্ণনা (ইংরেজি)" : "Description / Text (English)"}</label>
+                  <textarea 
+                    rows={3}
+                    className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-100 dark:bg-slate-900 ${textPrimary} outline-none focus:ring-1 focus:ring-emerald-500 resize-none`}
+                    value={editForm.text}
+                    onChange={(e) => setEditForm({ ...editForm, text: e.target.value })}
+                  />
+                </div>
+
+                {/* 3. CASE STUDY EXAMPLES */}
+                <div className="space-y-1">
+                  <label className={`font-semibold block ${textMuted} flex items-center gap-1`}>
+                    <span>{isBn ? "বাস্তব কেস বা উদাহরণ (বাংলা)" : "Practical Case / Example (Bengali)"}</span>
+                    <span className="text-[10px] text-emerald-600 font-bold">({isBn ? "ঐচ্ছিক" : "Optional"})</span>
+                  </label>
+                  <textarea 
+                    rows={3}
+                    placeholder={isBn ? "যেমন: হাবিব বিনা অনুমতিতে রহমান সাহেবের বাড়ি থেকে একটি সাইকেল সরাল..." : "e.g., A takes a bicycle out of B's possession without consent..."}
+                    className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-100 dark:bg-slate-900 ${textPrimary} outline-none focus:ring-1 focus:ring-emerald-500 resize-none`}
+                    value={editForm.exampleBn}
+                    onChange={(e) => setEditForm({ ...editForm, exampleBn: e.target.value })}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className={`font-semibold block ${textMuted} flex items-center gap-1`}>
+                    <span>{isBn ? "বাস্তব কেস বা উদাহরণ (ইংরেজি)" : "Practical Case / Example (English)"}</span>
+                    <span className="text-[10px] text-emerald-600 font-bold">({isBn ? "ঐচ্ছিক" : "Optional"})</span>
+                  </label>
+                  <textarea 
+                    rows={3}
+                    placeholder={isBn ? "Type the case scenario in English..." : "e.g., A takes a bicycle out of B's possession..."}
+                    className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-100 dark:bg-slate-900 ${textPrimary} outline-none focus:ring-1 focus:ring-emerald-500 resize-none`}
+                    value={editForm.example}
+                    onChange={(e) => setEditForm({ ...editForm, example: e.target.value })}
+                  />
+                </div>
+
+                {/* 4. GROUND EXPLANATION DETAILS */}
+                <div className="space-y-1">
+                  <label className={`font-semibold block ${textMuted}`}>{isBn ? "ধারার আইনি ব্যাখ্যা ও বিশ্লেষণ (বাংলা)" : "Legal Explanation & Elements (Bengali)"}</label>
+                  <textarea 
+                    rows={3}
+                    placeholder={isBn ? "ধারা বিশ্লেষণ এবং শাস্তির ব্যাখ্যা..." : "Add detailed breakdown of ingredients of the offense in Bengali..."}
+                    className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-100 dark:bg-slate-900 ${textPrimary} outline-none focus:ring-1 focus:ring-emerald-500 resize-none`}
+                    value={editForm.explanationBn}
+                    onChange={(e) => setEditForm({ ...editForm, explanationBn: e.target.value })}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className={`font-semibold block ${textMuted}`}>{isBn ? "ধারার আইনি ব্যাখ্যা ও বিশ্লেষণ (ইংরেজি)" : "Legal Explanation & Elements (English)"}</label>
+                  <textarea 
+                    rows={3}
+                    placeholder={isBn ? "Type the detailed analysis in English..." : "Add detailed breakdown of ingredients of the offense in English..."}
+                    className={`w-full p-2.5 rounded-lg border ${borderCol} bg-slate-100 dark:bg-slate-900 ${textPrimary} outline-none focus:ring-1 focus:ring-emerald-500 resize-none`}
+                    value={editForm.explanation}
+                    onChange={(e) => setEditForm({ ...editForm, explanation: e.target.value })}
+                  />
+                </div>
+
+              </div>
+
+              {/* Action Buttons */}
+              <div className="pt-2 border-t flex gap-2">
+                <button 
+                  onClick={handleSaveCustomSection}
+                  className="flex-1 py-3 bg-[#006A4E] text-white hover:bg-[#00523c] transition font-bold text-xs rounded-xl cursor-pointer"
+                >
+                  {isBn ? "সংরক্ষণ করুন" : "Save Changes"}
+                </button>
+                
+                <button 
+                  onClick={handleRevertSection}
+                  className="px-4 py-3 bg-rose-500/10 hover:bg-rose-500/25 text-[#C8102E] dark:text-rose-400 transition font-bold text-xs rounded-xl cursor-pointer"
+                  title={isBn ? "প্রাক-নির্ধারিত মূল ধারায় ফিরে যান" : "Revert back to standard description"}
+                >
+                  {isBn ? "মূল ধারায় ফিরুন" : "Reset Default"}
+                </button>
+
+                <button 
+                  onClick={() => setIsEditingSection(false)}
+                  className={`px-4 py-3 ${surfaceAlt} ${textMuted} hover:${textPrimary} font-bold text-xs rounded-xl cursor-pointer`}
+                >
+                  {isBn ? "বাতিল" : "Cancel"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 4. NAVIGATION BAR (STICKY FOOTER FRAME) */}
+        <div className={`absolute bottom-0 inset-x-0 h-16 lg:hidden ${surface} border-t ${borderCol} grid grid-cols-5 z-20 shrink-0 select-none shadow-lg px-2`}>
+          {(() => {
+            const items = [
+              { id: "home", label: "Home", labelBn: "প্রধান", icon: Home },
+              { id: "book", label: "Laws", labelBn: "আইন গ্রন্থ", icon: Book },
+              { id: "search", label: "Search", labelBn: "অনুসন্ধান", icon: Search },
+              { id: "bookmark", label: "Saved", labelBn: "বুকমার্ক", icon: Bookmark }
+            ];
+            if (userRole === "admin") {
+              items.push({ id: "admin", label: "Admin", labelBn: "এডমিন", icon: Shield });
+            } else {
+              items.push({ id: "star", label: "Favorites", labelBn: "প্রিয় তালিকা", icon: Star });
+            }
+            return items.map((nav) => {
+              const IconComponent = nav.icon;
+              const active = tab === nav.id && !selectedLaw && !selectedSection;
+              return (
+                <button
+                  key={nav.id}
+                  onClick={() => {
+                    setSelectedLaw(null);
+                    setSelectedSection(null);
+                    setTab(nav.id);
+                    setShowNotifications(false);
+                  }}
+                  className={`flex flex-col items-center justify-center gap-1.5 transition-colors duration-200 outline-none ${
+                    active ? "text-[#006A4E] dark:text-emerald-400 font-bold" : textMuted
+                  }`}
+                >
+                  <div className="relative">
+                    <IconComponent className="w-5 h-5 leading-none block" />
+                    {nav.id === "bookmark" && bookmarks.length > 0 && (
+                      <span className="absolute -top-1 -right-1 text-[8px] bg-amber-500 text-slate-950 font-bold font-mono h-3.5 w-3.5 flex items-center justify-center rounded-full">
+                        {bookmarks.length}
+                      </span>
+                    )}
+                    {nav.id === "star" && favorites.length > 0 && (
+                      <span className="absolute -top-1 -right-1.5 w-2 h-2 rounded-full bg-rose-500" />
+                    )}
+                  </div>
+                  <span className="text-[9px] leading-none tracking-wide text-center uppercase block font-medium">
+                    {isBn ? nav.labelBn : nav.label}
+                  </span>
+                </button>
+              );
+            });
+          })()}
         </div>
 
       </div>

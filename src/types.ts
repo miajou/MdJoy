@@ -19,6 +19,10 @@ export interface Section {
   lawTitle?: string;
   lawCode?: string;
   lawId?: string;
+  explanation?: string;
+  explanationBn?: string;
+  example?: string;
+  exampleBn?: string;
 }
 
 export interface Law {
